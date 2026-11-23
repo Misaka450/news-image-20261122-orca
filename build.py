@@ -130,10 +130,10 @@ def illustration(d, box, glyph, accent):
 def draw_lead(d, story, box, index):
     x, y, w, h = box
     accent = REGION_COLORS.get(story.region, BLUE)
-    illustration(d, (x, y, w, 120), story.glyph, accent)
+    illustration(d, (x, y, w, 170), story.glyph, accent)
     meta = f"{story.region} · {STATUS_LABEL[story.status]}"
-    fdraw(d, (x, y + 128), meta, 8, accent, True, True)
-    end = wrapped(d, story.headline, x, y + 145, w, 18, INK, True, True, 3, 0.97)
+    fdraw(d, (x, y + 178), meta, 8, accent, True, True)
+    end = wrapped(d, story.headline, x, y + 195, w, 17, INK, True, True, 3, 0.97)
     wrapped(d, story.detail, x, end + 3, w, 9, MUTED, False, False, 2, 1.05)
     fdraw(d, (x, y + h - 6), story.source, 7, MUTED, False, True)
 
@@ -143,8 +143,8 @@ def draw_well(d, story, x, y, w, row_h):
     # No card outline: only a short editorial rule and a tiny glyph mark.
     line(d, [(x, y + 5), (x + 14, y + 5)], fill=accent, width=3)
     fdraw(d, (x + 20, y), f"{story.region} · {STATUS_LABEL[story.status]}", 7, accent, True, True)
-    wrapped(d, story.headline, x + 20, y + 12, w - 20, 10, INK, True, True, 2, .93)
-    wrapped(d, story.detail, x + 20, y + row_h - 17, w - 20, 7, MUTED, False, False, 1, 1)
+    wrapped(d, story.headline, x + 20, y + 12, w - 20, 8, INK, True, True, 2, .94)
+    wrapped(d, story.detail, x + 20, y + row_h - 10, w - 20, 6, MUTED, False, False, 1, 1)
     # one primitive keyed to the story type, functioning as a newspaper marginal mark
     if story.glyph in {"water", "snow"}:
         for i in range(3):
@@ -173,12 +173,12 @@ def main():
     line(d, [(margin, 105), (W - margin, 105)], width=2)
     line(d, [(margin, 110), (W - margin, 110)], width=1)
 
-    scoreboard = [("186", "DRONES"), ("0", "DEAL AT COP31"), ("74,742", "GAZA TOLL"), ("$12.1BN", "WFP ASK"), (str(len(STORIES)), "STORIES / 7 REGIONS")]
+    scoreboard = [("186", "DRONES"), ("0", "DEAL AT COP31"), ("74,742", "GAZA TOLL"), ("$12.1BN", "WFP ASK"), ("46", "STORIES / 7 REGIONS")]
     rect(d, (margin, 118, W - margin, 147), fill=RED)
     xx = margin + 4
     for i, (big, label) in enumerate(scoreboard):
         fdraw(d, (xx, 125), big, 15, PAPER, True)
-        fdraw(d, (xx + (len(big) * 9 + 8), 126), label, 11, PAPER, True)
+        fdraw(d, (xx + (len(big) * 9 + 8), 126), label, 10, PAPER, True)
         xx += [116, 205, 216, 154, 0][i]
         if i < len(scoreboard) - 1:
             line(d, [(xx - 9, 124), (xx - 9, 141)], fill=PAPER, width=1)
@@ -217,7 +217,7 @@ def main():
     col_names = ["MIDDLE EAST", "EUROPE", "SOUTH & EAST ASIA", "LATIN AMERICA / AFRICA"]
     for ci, ((x, w), stories) in enumerate(zip(cols, buckets)):
         fdraw(d, (x, 505), col_names[ci], 10, REGION_COLORS.get(stories[0].region, GREEN), True, True)
-        row_h = 39 if ci < 3 else 47
+        row_h = 31
         for j, story in enumerate(stories):
             draw_well(d, story, x, 523 + j * row_h, w, row_h)
 
