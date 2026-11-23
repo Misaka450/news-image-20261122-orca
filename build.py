@@ -138,13 +138,14 @@ def draw_lead(d, story, box, index):
     fdraw(d, (x, y + h - 6), story.source, 7, MUTED, False, True)
 
 
-def draw_well(d, story, x, y, w, row_h):
+def draw_well(d, story, x, y, w, row_h, compact=False):
     accent = REGION_COLORS.get(story.region, BLUE)
     # No card outline: only a short editorial rule and a tiny glyph mark.
     line(d, [(x, y + 5), (x + 14, y + 5)], fill=accent, width=3)
     fdraw(d, (x + 20, y), f"{story.region} · {STATUS_LABEL[story.status]}", 7, accent, True, True)
-    wrapped(d, story.headline, x + 20, y + 12, w - 20, 8, INK, True, True, 2, .94)
-    wrapped(d, story.detail, x + 20, y + row_h - 10, w - 20, 6, MUTED, False, False, 1, 1)
+    title_size = 7 if compact else 8
+    wrapped(d, story.headline, x + 20, y + 12, w - 20, title_size, INK, True, True, 1 if compact else 2, .94)
+    wrapped(d, story.detail, x + 20, y + row_h - (7 if compact else 10), w - 20, 5 if compact else 6, MUTED, False, False, 1, 1)
     # one primitive keyed to the story type, functioning as a newspaper marginal mark
     if story.glyph in {"water", "snow"}:
         for i in range(3):
@@ -217,9 +218,9 @@ def main():
     col_names = ["MIDDLE EAST", "EUROPE", "SOUTH & EAST ASIA", "LATIN AMERICA / AFRICA"]
     for ci, ((x, w), stories) in enumerate(zip(cols, buckets)):
         fdraw(d, (x, 505), col_names[ci], 10, REGION_COLORS.get(stories[0].region, GREEN), True, True)
-        row_h = 31
+        row_h = 22 if ci == 3 else 31
         for j, story in enumerate(stories):
-            draw_well(d, story, x, 523 + j * row_h, w, row_h)
+            draw_well(d, story, x, 523 + j * row_h, w, row_h, compact=(ci == 3))
 
     # Dispatch ribbon keeps the smallest stories legible without pretending they are cards.
     dispatch_y = 919
