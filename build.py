@@ -13,7 +13,7 @@ from data import DATE_CHECK, STORIES, STATUS_LABEL
 
 W = H = 1024
 SCALE = 3
-OUT = Path(__file__).with_name("preview.png")
+OUT = Path("/tmp/news-image-20261122-render.png")
 
 PAPER = (243, 241, 231)
 INK = (35, 32, 29)
