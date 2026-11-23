@@ -1,648 +1,248 @@
-#!/usr/bin/env python3
-# build.py -- "The World Daily" front-page plate, Sunday 22 November 2026.
-# Orca's entry for make.fun news-image-20261122.
-#
-# Design (by Orca, drawn by hand in code):
-#   a real broadsheet front page, not a dashboard.
-#   - paper stock, ink rules, no boxes-with-badges anywhere
-#   - 4 lead stories carried by code-drawn spot illustrations
-#   - a red sports-style scoreboard for the day's hard numbers
-#   - a solid region band whose segment widths encode story counts
-#   - unequal editorial columns with kicker lines, then wire dispatches
-#   - a DATE CHECK bar naming what was left out, and why
-# Deterministic: fixed seed, no network, Pillow only.
+from __future__ import annotations
 
+import hashlib
 import math
-import os
 import random
+import textwrap
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from data import STORIES, DATE_CHECK, STATUS_LABEL
+from data import DATE_CHECK, STORIES, STATUS_LABEL
+
 
 W = H = 1024
-M = 22
-INNER = W - 2 * M
+SCALE = 3
+OUT = Path(__file__).with_name("preview.png")
 
-PAPER = (243, 238, 226)
-PAPER_DK = (231, 225, 209)
-WHITE = (250, 247, 240)
-INK = (27, 24, 21)
-INK_SOFT = (82, 75, 66)
-RED = (166, 33, 41)
-RED_DK = (124, 22, 29)
-ORANGE = (212, 108, 38)
-SMOKE = (150, 145, 136)
-SEA = (58, 84, 102)
-
-REGION_COLOR = {
-    "EUROPE": (43, 93, 138),
-    "NORTH AMERICA": (138, 43, 43),
-    "LATIN AMERICA": (61, 122, 74),
-    "MIDDLE EAST": (176, 122, 42),
-    "SOUTH & EAST ASIA": (106, 74, 138),
-    "AFRICA": (138, 90, 43),
-    "OCEANIA & POLAR": (42, 122, 138),
-}
-REGION_SHORT = {
-    "EUROPE": "EUROPE",
-    "NORTH AMERICA": "N. AMERICA",
-    "LATIN AMERICA": "LATAM",
-    "MIDDLE EAST": "MID. EAST",
-    "SOUTH & EAST ASIA": "S. & E. ASIA",
-    "AFRICA": "AFRICA",
-    "OCEANIA & POLAR": "OCEANIA",
+PAPER = (243, 241, 231)
+INK = (35, 32, 29)
+MUTED = (103, 96, 87)
+RED = (166, 31, 40)
+BLUE = (52, 100, 143)
+GOLD = (179, 126, 39)
+GREEN = (62, 125, 76)
+PURPLE = (110, 74, 138)
+TEAL = (47, 125, 137)
+REGION_COLORS = {
+    "EUROPE": BLUE,
+    "MIDDLE EAST": GOLD,
+    "LATIN AMERICA": GREEN,
+    "NORTH AMERICA": (144, 48, 53),
+    "SOUTH & EAST ASIA": PURPLE,
+    "AFRICA": (153, 96, 42),
+    "OCEANIA & POLAR": TEAL,
 }
 
-FD = "/usr/share/fonts/truetype/dejavu/"
-FL = "/usr/share/fonts/truetype/liberation/"
+
+def font(size: int, bold: bool = False, serif: bool = False):
+    if serif:
+        name = "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"
+    else:
+        name = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    return ImageFont.truetype(name, size * SCALE)
 
 
-def serif(name, size):
-    return ImageFont.truetype(FD + name, size)
+def fdraw(d, xy, value, size, fill=INK, bold=False, serif=False, anchor=None):
+    d.text((xy[0] * SCALE, xy[1] * SCALE), value, font=font(size, bold, serif), fill=fill, anchor=anchor)
 
 
-f_mast = serif("DejaVuSerif-Bold.ttf", 15)
-f_mast_i = serif("DejaVuSerif-Italic.ttf", 12)
-f_date = serif("DejaVuSerif-Bold.ttf", 46)
-f_score = ImageFont.truetype(FL + "LiberationMono-Bold.ttf", 17)
-f_band = ImageFont.truetype(FL + "LiberationMono-Bold.ttf", 12)
-f_kick = serif("DejaVuSerifCondensed-Bold.ttf", 11)
-f_head = serif("DejaVuSerifCondensed-Bold.ttf", 21)
-f_head_s = serif("DejaVuSerifCondensed-Bold.ttf", 13)
-f_sub = serif("DejaVuSerifCondensed.ttf", 13)
-f_sub_s = serif("DejaVuSerifCondensed.ttf", 11)
-f_cred = serif("DejaVuSerifCondensed-Italic.ttf", 10)
-f_disp = serif("DejaVuSerifCondensed.ttf", 12)
-f_dc = ImageFont.truetype(FL + "LiberationMono-Bold.ttf", 11)
-f_foot = serif("DejaVuSerifCondensed-Italic.ttf", 10)
+def line(d, points, fill=INK, width=1):
+    d.line([(int(x * SCALE), int(y * SCALE)) for x, y in points], fill=fill, width=max(1, width * SCALE), joint="curve")
 
 
-def blend(a, b, t):
-    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+def rect(d, box, fill=None, outline=None, width=1):
+    d.rectangle(tuple(int(v * SCALE) for v in box), fill=fill, outline=outline, width=max(1, width * SCALE))
 
 
-def wrap(d, text, font, width):
-    out, cur = [], ""
-    for word in text.split():
-        trial = (cur + " " + word).strip()
-        if d.textlength(trial, font=font) <= width:
-            cur = trial
+def wrapped(d, text, x, y, width, size, fill=INK, bold=False, serif=False, max_lines=None, leading=1.08):
+    ft = font(size, bold, serif)
+    words = text.split()
+    rows, row = [], ""
+    for word in words:
+        trial = (row + " " + word).strip()
+        if d.textlength(trial, font=ft) <= width * SCALE:
+            row = trial
         else:
-            if cur:
-                out.append(cur)
-            cur = word
-    if cur:
-        out.append(cur)
-    return out
-
-
-def wrap_max(d, text, font, width, maxn):
-    lines = wrap(d, text, font, width)
-    if len(lines) <= maxn:
-        return lines
-    keep = lines[:maxn]
-    last = keep[-1]
-    while last and d.textlength(last + "...", font=font) > width:
-        last = last[:-1]
-    keep[-1] = last.rstrip() + "..."
-    return keep
-
-
-# ---------------------------------------------------------------- glyphs
-# Every glyph is built from primitives at half-size s around (cx, cy).
-# Abstract on purpose: no faces, no real buildings, nothing to get wrong.
-
-def g_flame(d, cx, by, s, col=RED, inner=ORANGE):
-    d.polygon([(cx, by - 2.2 * s), (cx + .75 * s, by - .9 * s),
-               (cx + .5 * s, by), (cx, by - .4 * s),
-               (cx - .5 * s, by), (cx - .75 * s, by - .9 * s)], fill=col)
-    d.polygon([(cx, by - 1.3 * s), (cx + .4 * s, by - .5 * s),
-               (cx + .25 * s, by), (cx, by - .25 * s),
-               (cx - .25 * s, by), (cx - .4 * s, by - .5 * s)], fill=inner)
-
-
-def g_drone(d, cx, cy, s, col):
-    lw = max(2, int(s * .22))
-    d.line([cx - s, cy - s * .55, cx + s, cy + s * .55], fill=col, width=lw)
-    d.line([cx - s, cy + s * .55, cx + s, cy - s * .55], fill=col, width=lw)
-    for dx, dy in ((-1, -.55), (1, .55), (-1, .55), (1, -.55)):
-        ex, ey = cx + dx * s, cy + dy * s
-        d.ellipse([ex - s * .34, ey - s * .16, ex + s * .34, ey + s * .16],
-                  outline=col, width=2)
-    d.rectangle([cx - s * .3, cy - s * .18, cx + s * .3, cy + s * .18], fill=col)
-
-
-def g_ship(d, cx, cy, s, col):
-    d.polygon([(cx - s, cy), (cx + s, cy), (cx + .8 * s, cy + .5 * s),
-               (cx - .85 * s, cy + .5 * s)], fill=col)
-    d.rectangle([cx - .3 * s, cy - .42 * s, cx + .2 * s, cy], fill=col)
-    d.rectangle([cx - .12 * s, cy - .8 * s, cx + .02 * s, cy - .42 * s], fill=col)
-    d.line([cx - .05 * s, cy - .8 * s, cx + .45 * s, cy - .45 * s],
-           fill=col, width=2)
-
-
-def g_house(d, cx, cy, s, col):
-    d.rectangle([cx - .8 * s, cy - .2 * s, cx + .8 * s, cy + .9 * s], fill=col)
-    d.polygon([(cx - .95 * s, cy - .2 * s), (cx, cy - .95 * s),
-               (cx + .95 * s, cy - .2 * s)], fill=col)
-
-
-def g_ballot(d, cx, cy, s, col):
-    d.rectangle([cx - .8 * s, cy - .35 * s, cx + .8 * s, cy + .85 * s],
-                outline=col, width=max(2, int(s * .18)))
-    d.rectangle([cx - .45 * s, cy - .38 * s, cx + .45 * s, cy - .22 * s], fill=col)
-    d.polygon([(cx - .12 * s, cy - 1.0 * s), (cx + .3 * s, cy - 1.0 * s),
-               (cx + .2 * s, cy - .3 * s), (cx - .02 * s, cy - .3 * s)], fill=col)
-
-
-def g_dome(d, cx, cy, s, col):
-    d.pieslice([cx - s, cy - s, cx + s, cy + .9 * s], 180, 360, fill=col)
-    d.rectangle([cx - 1.1 * s, cy - .08 * s, cx + 1.1 * s, cy + .08 * s], fill=col)
-    for i in range(5):
-        px = cx - .9 * s + i * .45 * s
-        d.rectangle([px - .07 * s, cy + .08 * s, px + .07 * s, cy + .8 * s],
-                    fill=col)
-
-
-def g_star(d, cx, cy, s, col, points=5):
-    pts = []
-    for i in range(points * 2):
-        r = s if i % 2 == 0 else s * .45
-        a = -math.pi / 2 + i * math.pi / points
-        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
-    d.polygon(pts, fill=col)
-
-
-def g_explosion(d, cx, cy, s, col):
-    pts = []
-    for i in range(16):
-        r = s if i % 2 == 0 else s * .4
-        a = i * math.pi / 8
-        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
-    d.polygon(pts, fill=col)
-
-
-def g_bolt(d, cx, cy, s, col):
-    d.polygon([(cx + .25 * s, cy - s), (cx - .55 * s, cy + .15 * s),
-               (cx - .05 * s, cy + .15 * s), (cx - .25 * s, cy + s),
-               (cx + .55 * s, cy - .15 * s), (cx + .05 * s, cy - .15 * s)],
-              fill=col)
-
-
-def g_waves(d, cx, cy, s, col):
-    for row in range(3):
-        yy = cy - s * .6 + row * s * .6
-        for k in range(3):
-            x0 = cx - s + k * s * .8
-            d.arc([x0, yy - s * .28, x0 + s * .8, yy + s * .28],
-                  180, 360, fill=col, width=2)
-
-
-def g_heart(d, cx, cy, s, col):
-    d.ellipse([cx - .85 * s, cy - .75 * s, cx, cy + .1 * s], fill=col)
-    d.ellipse([cx, cy - .75 * s, cx + .85 * s, cy + .1 * s], fill=col)
-    d.polygon([(cx - .78 * s, cy - .2 * s), (cx + .78 * s, cy - .2 * s),
-               (cx, cy + .9 * s)], fill=col)
-
-
-def g_scales(d, cx, cy, s, col):
-    d.line([cx, cy - s, cx, cy + .7 * s], fill=col, width=max(2, int(s * .16)))
-    d.line([cx - .9 * s, cy - .6 * s, cx + .9 * s, cy - .6 * s],
-           fill=col, width=max(2, int(s * .16)))
-    for side in (-1, 1):
-        px = cx + side * .9 * s
-        d.line([px, cy - .6 * s, px - .3 * s, cy + .05 * s], fill=col, width=2)
-        d.line([px, cy - .6 * s, px + .3 * s, cy + .05 * s], fill=col, width=2)
-        d.arc([px - .32 * s, cy - .1 * s, px + .32 * s, cy + .5 * s],
-              0, 180, fill=col, width=2)
-    d.line([cx - .5 * s, cy + .85 * s, cx + .5 * s, cy + .85 * s],
-           fill=col, width=max(2, int(s * .16)))
-
-
-def g_plane(d, cx, cy, s, col):
-    d.polygon([(cx - s, cy + .15 * s), (cx + s, cy - .35 * s),
-               (cx + .75 * s, cy + .05 * s), (cx - .7 * s, cy + .45 * s)],
-              fill=col)
-    d.polygon([(cx - .2 * s, cy + .1 * s), (cx + .15 * s, cy + .85 * s),
-               (cx + .45 * s, cy + .8 * s), (cx + .25 * s, cy)], fill=col)
-
-
-def g_key(d, cx, cy, s, col):
-    d.ellipse([cx - s, cy - .7 * s, cx - .1 * s, cy + .2 * s],
-              outline=col, width=max(2, int(s * .18)))
-    d.line([cx - .1 * s, cy - .25 * s, cx + .9 * s, cy + .75 * s],
-           fill=col, width=max(2, int(s * .18)))
-    d.line([cx + .55 * s, cy + .42 * s, cx + .85 * s, cy + .2 * s],
-           fill=col, width=2)
-    d.line([cx + .75 * s, cy + .6 * s, cx + 1.05 * s, cy + .38 * s],
-           fill=col, width=2)
-
-
-def g_candle(d, cx, cy, s, col):
-    d.rectangle([cx - .3 * s, cy - .1 * s, cx + .3 * s, cy + .9 * s], fill=col)
-    g_flame(d, cx, cy - .15 * s, .5 * s, col=col, inner=col)
-
-
-def g_flask(d, cx, cy, s, col):
-    d.polygon([(cx - .7 * s, cy + .8 * s), (cx + .7 * s, cy + .8 * s),
-               (cx + .2 * s, cy - .3 * s), (cx - .2 * s, cy - .3 * s)],
-              outline=col, width=max(2, int(s * .16)))
-    d.line([cx - .2 * s, cy - .3 * s, cx - .2 * s, cy - .8 * s],
-           fill=col, width=max(2, int(s * .16)))
-    d.line([cx + .2 * s, cy - .3 * s, cx + .2 * s, cy - .8 * s],
-           fill=col, width=max(2, int(s * .16)))
-
-
-def g_truck(d, cx, cy, s, col):
-    d.rectangle([cx - s, cy - .5 * s, cx + .25 * s, cy + .35 * s],
-                outline=col, width=max(2, int(s * .16)))
-    d.rectangle([cx + .25 * s, cy - .15 * s, cx + .95 * s, cy + .35 * s],
-                outline=col, width=max(2, int(s * .16)))
-    for wx in (-.6, .6):
-        d.ellipse([cx + wx * s - .18 * s, cy + .3 * s,
-                   cx + wx * s + .18 * s, cy + .66 * s], fill=col)
-
-
-def g_snow(d, cx, cy, s, col):
-    for i in range(3):
-        a = i * math.pi / 3
-        dx, dy = math.cos(a) * s, math.sin(a) * s
-        d.line([cx - dx, cy - dy, cx + dx, cy + dy], fill=col, width=2)
-
-
-def g_flag(d, cx, cy, s, col):
-    d.line([cx - .5 * s, cy - s, cx - .5 * s, cy + s],
-           fill=col, width=max(2, int(s * .16)))
-    d.polygon([(cx - .5 * s, cy - s), (cx + .8 * s, cy - .65 * s),
-               (cx - .5 * s, cy - .3 * s)], fill=col)
-
-
-def g_eye(d, cx, cy, s, col):
-    d.arc([cx - s, cy - .6 * s, cx + s, cy + .6 * s], 200, 340,
-          fill=col, width=max(2, int(s * .16)))
-    d.arc([cx - s, cy - .6 * s, cx + s, cy + .6 * s], 20, 160,
-          fill=col, width=max(2, int(s * .16)))
-    d.ellipse([cx - .22 * s, cy - .22 * s, cx + .22 * s, cy + .22 * s], fill=col)
-
-
-def g_phone(d, cx, cy, s, col):
-    d.rectangle([cx - .45 * s, cy - s, cx + .45 * s, cy + s],
-                outline=col, width=max(2, int(s * .16)))
-    d.line([cx - .2 * s, cy + .7 * s, cx + .2 * s, cy + .7 * s], fill=col, width=2)
-
-
-def g_crash(d, cx, cy, s, col):
-    d.line([cx - s, cy - .8 * s, cx - .2 * s, cy - .1 * s],
-           fill=col, width=max(2, int(s * .2)))
-    d.line([cx - .2 * s, cy - .1 * s, cx - .55 * s, cy + .3 * s],
-           fill=col, width=max(2, int(s * .2)))
-    d.line([cx - .55 * s, cy + .3 * s, cx + .3 * s, cy + .55 * s],
-           fill=col, width=max(2, int(s * .2)))
-    d.line([cx + .3 * s, cy + .55 * s, cx + .9 * s, cy - .1 * s],
-           fill=col, width=max(2, int(s * .2)))
-
-
-def g_money(d, cx, cy, s, col):
-    d.ellipse([cx - s, cy - s, cx + s, cy + s], outline=col,
-              width=max(2, int(s * .16)))
-    fnt = serif("DejaVuSerif-Bold.ttf", int(s * 1.3))
-    d.text((cx, cy), "$", font=fnt, fill=col, anchor="mm")
-
-
-def g_bridge(d, cx, cy, s, col):
-    d.arc([cx - s, cy - .9 * s, cx + s, cy + .9 * s], 180, 360,
-          fill=col, width=max(2, int(s * .16)))
-    for px in (-.6, .6):
-        d.line([cx + px * s, cy - .55 * s, cx + px * s, cy + .6 * s],
-               fill=col, width=max(2, int(s * .16)))
-    d.line([cx - s, cy + .6 * s, cx + s, cy + .6 * s],
-           fill=col, width=max(2, int(s * .16)))
-
-
-def g_block(d, cx, cy, s, col):
-    d.rectangle([cx - .7 * s, cy - .7 * s, cx + .7 * s, cy + .7 * s],
-                outline=col, width=max(2, int(s * .16)))
-    d.line([cx - .7 * s, cy - .7 * s, cx + .7 * s, cy + .7 * s], fill=col, width=2)
-    d.line([cx - .7 * s, cy + .7 * s, cx + .7 * s, cy - .7 * s], fill=col, width=2)
-
-
-def g_dot(d, cx, cy, s, col):
-    d.polygon([(cx, cy - s * .8), (cx + s * .8, cy), (cx, cy + s * .8),
-               (cx - s * .8, cy)], fill=col)
-
-
-GLYPHS = {
-    "drone": g_drone, "ship": g_ship, "tanker": g_ship, "house": g_house,
-    "ballot": g_ballot, "dome": g_dome, "star": g_star, "alert": g_explosion,
-    "explosion": g_explosion, "power": g_bolt, "water": g_waves,
-    "heart": g_heart, "court": g_scales, "plane": g_plane, "key": g_key,
-    "memory": g_candle, "flask": g_flask, "truck": g_truck, "snow": g_snow,
-    "flag": g_flag, "eyes": g_eye, "phone": g_phone, "crash": g_crash,
-    "money": g_money, "bridge": g_bridge, "block": g_block,
-}
-
-
-def draw_glyph(d, glyph, cx, cy, s, col):
-    GLYPHS.get(glyph, g_dot)(d, cx, cy, s, col)
-
-
-# ---------------------------------------------------------------- scenes
-# The four lead illustrations. Duotone: region tint over paper, ink figures.
-
-def scene_frame(d, x, y, w, h, col):
-    d.rectangle([x, y, x + w, y + h], fill=blend(col, PAPER, .84))
-    ground = y + int(h * .76)
-    d.rectangle([x, ground, x + w, y + h], fill=blend(col, PAPER, .62))
-    d.line([x, ground, x + w, ground], fill=blend(col, INK, .35), width=2)
-    return ground
-
-
-def scene_cop(d, x, y, w, h, col):
-    """COP31 collapses: a cracked globe above an empty table."""
-    ground = scene_frame(d, x, y, w, h, col)
-    cx, cy, r = x + w // 2, y + int(h * .34), int(min(w, h) * .26)
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=INK, width=4)
-    d.line([cx - r, cy, cx + r, cy], fill=INK, width=2)
-    d.arc([cx - r, cy - r * .55, cx + r, cy + r * .55], 0, 360, fill=INK, width=2)
-    crack = [(cx - r * .15, cy - r), (cx + r * .18, cy - r * .35),
-             (cx - r * .1, cy + r * .05), (cx + r * .3, cy + r * .45),
-             (cx + r * .08, cy + r)]
-    d.line(crack, fill=RED, width=4)
-    # table and empty chairs
-    tw = int(w * .66)
-    d.rectangle([cx - tw // 2, ground - 8, cx + tw // 2, ground], fill=INK)
-    for i in (-1, 0, 1):
-        bx = cx + i * int(tw * .38)
-        d.rectangle([bx - 9, ground - 30, bx + 9, ground - 8], outline=INK, width=3)
-    # scattered paper
-    d.polygon([(cx - tw // 2 + 12, ground - 12), (cx - tw // 2 + 34, ground - 16),
-               (cx - tw // 2 + 30, ground - 6)], fill=PAPER)
-
-
-def scene_ship_fire(d, x, y, w, h, col):
-    """The corvette Merkury burning off Benghazi."""
-    ground = scene_frame(d, x, y, w, h, col)
-    for i in range(4):
-        yy = ground + 6 + i * 7
-        for k in range(int(w // 26)):
-            d.arc([x + 8 + k * 26, yy - 6, x + 8 + k * 26 + 22, yy + 6],
-                  180, 360, fill=SEA, width=2)
-    sw = int(w * .62)
-    sx, sy = x + (w - sw) // 2, ground - int(h * .1)
-    g_ship(d, sx + sw // 2, sy, sw // 2, INK)
-    g_flame(d, sx + int(sw * .38), sy - 6, int(h * .09))
-    g_flame(d, sx + int(sw * .6), sy - 2, int(h * .07))
-    for i, (ox, oy, r) in enumerate(((0, -46, 12), (10, -66, 16), (-8, -90, 20))):
-        d.ellipse([sx + sw // 2 + ox - r, sy + oy - r,
-                   sx + sw // 2 + ox + r, sy + oy + r], outline=SMOKE, width=3)
-
-
-def scene_drone_block(d, x, y, w, h, col):
-    """Drone strike on a residential block at Dymer."""
-    scene_frame(d, x, y, w, h, col)
-    bw, bh = int(w * .44), int(h * .62)
-    bx, by = x + int(w * .1), y + int(h * .14)
-    d.rectangle([bx, by, bx + bw, by + bh], fill=INK)
-    for r in range(int(bh // 18)):
-        for c in range(int(bw // 18)):
-            wx, wy = bx + 5 + c * 18, by + 5 + r * 18
-            d.rectangle([wx, wy, wx + 8, wy + 10], fill=PAPER)
-    cxp, cyp = bx + int(bw * .68), by + int(bh * .42)
-    jag = [(cxp - 16, cyp - 24), (cxp + 2, cyp - 14), (cxp + 18, cyp - 22),
-           (cxp + 12, cyp), (cxp + 20, cyp + 14), (cxp, cyp + 10),
-           (cxp - 14, cyp + 20), (cxp - 8, cyp)]
-    d.polygon(jag, fill=PAPER)
-    g_flame(d, cxp, cyp + 14, 12)
-    dcx, dcy = x + int(w * .72), y + int(h * .2)
-    g_drone(d, dcx, dcy, 15, INK)
-    d.arc([dcx - 40, dcy - 14, dcx - 8, dcy + 30], 280, 40, fill=INK_SOFT, width=2)
-    d.arc([dcx - 54, dcy - 22, dcx - 8, dcy + 40], 280, 40, fill=INK_SOFT, width=2)
-
-
-def scene_ballot(d, x, y, w, h, col):
-    """The House changes hands: dome over a ballot box."""
-    ground = scene_frame(d, x, y, w, h, col)
-    cx = x + w // 2
-    g_dome(d, cx, y + int(h * .4), int(w * .4), blend(col, INK, .5))
-    bw = int(w * .34)
-    g_ballot(d, cx, ground - int(h * .16), bw // 2, INK)
-    g_star(d, x + int(w * .18), y + int(h * .2), 9, RED)
-    g_star(d, x + int(w * .82), y + int(h * .16), 7, RED)
-
-
-SCENES = [scene_cop, scene_ship_fire, scene_drone_block, scene_ballot]
-
-
-# ---------------------------------------------------------------- page
-
-def paper_texture(d):
-    rnd = random.Random(20261122)
-    for _ in range(5200):
-        px, py = rnd.randrange(W), rnd.randrange(H)
-        delta = rnd.choice((-7, -5, 5, 6))
-        base = d.im.getpixel((px, py)) if hasattr(d, "im") else None
-    # cheaper: draw 1px dots via point list
-    pts_dark, pts_light = [], []
-    for _ in range(2600):
-        pts_dark.append((rnd.randrange(W), rnd.randrange(H)))
-        pts_light.append((rnd.randrange(W), rnd.randrange(H)))
-    d.point(pts_dark, fill=PAPER_DK)
-    d.point(pts_light, fill=(250, 246, 236))
-
-
-def masthead(d):
-    d.rectangle([M, 22, W - M, 25], fill=INK)
-    d.text((M, 32), "THE WORLD DAILY", font=f_mast, fill=INK)
-    t = "one day on earth, drawn by hand"
-    d.text((W - M - d.textlength(t, font=f_mast_i), 34), t,
-           font=f_mast_i, fill=INK_SOFT)
-    date = "Sunday 22 November 2026"
-    dw = d.textlength(date, font=f_date)
-    d.text(((W - dw) / 2, 48), date, font=f_date, fill=INK)
-    d.rectangle([M, 104, W - M, 106], fill=INK)
-    d.line([M, 109, W - M, 109], fill=INK, width=1)
-
-
-def scoreboard(d):
-    y0, y1 = 118, 148
-    d.rectangle([M, y0, W - M, y1], fill=RED)
-    d.rectangle([M, y1 - 3, W - M, y1], fill=RED_DK)
-    n = len(STORIES)
-    txt = (f"186 DRONES  |  0 DEAL AT COP31  |  74,742 GAZA TOLL  |  "
-           f"$12.1BN WFP ASK  |  {n} STORIES / 7 REGIONS")
-    tw = d.textlength(txt, font=f_score)
-    d.text(((W - tw) / 2, y0 + 7), txt, font=f_score, fill=WHITE)
-
-
-def region_band(d):
-    y0, y1 = 156, 174
-    counts = {}
-    order = []
-    for st in STORIES:
-        counts[st.region] = counts.get(st.region, 0) + 1
-        if st.region not in order:
-            order.append(st.region)
-    total = sum(counts.values())
-    x = M
-    for i, reg in enumerate(order):
-        seg = int(INNER * counts[reg] / total)
-        if i == len(order) - 1:
-            seg = W - M - x
-        col = REGION_COLOR[reg]
-        d.rectangle([x, y0, x + seg, y1], fill=col)
-        label = f"{REGION_SHORT[reg]} {counts[reg]}"
-        if d.textlength(label, font=f_band) + 10 <= seg:
-            d.text((x + 6, y0 + 3), label, font=f_band, fill=WHITE)
-        x += seg
-
-
-def lead_cards(d, top):
-    leads = STORIES[:4]
-    widths = [296, 238, 226, 192]
-    gap = (INNER - sum(widths)) / 3
-    x = M
-    scene_h = 168
-    for st, wcol, scene in zip(leads, widths, SCENES):
-        region, place, kicker, head = st.region, st.place, st.kicker, st.headline
-        counters, status, credits = st.detail, st.status, st.source
-        col = REGION_COLOR[region]
-        scene(d, x, top, wcol, scene_h, col)
-        yy = top + scene_h + 8
-        d.rectangle([x, yy + 2, x + 8, yy + 10], fill=col)
-        kick = f"{REGION_SHORT[region]} · {place.upper()} · {kicker} · {STATUS_LABEL[status]}"
-        while d.textlength(kick, font=f_kick) > wcol - 13:
-            kick = kick[:-1]
-        kick = kick.rstrip(" ·") + "…"
-        d.text((x + 13, yy), kick, font=f_kick, fill=col)
-        yy += 17
-        for ln in wrap_max(d, head, f_head, wcol, 3):
-            d.text((x, yy), ln, font=f_head, fill=INK)
-            yy += 23
-        yy += 3
-        for ln in wrap_max(d, counters, f_sub, wcol, 2):
-            d.text((x, yy), ln, font=f_sub, fill=INK_SOFT)
-            yy += 15
-        d.text((x, yy + 1), credits, font=f_cred, fill=INK_SOFT)
-        x += wcol + gap
-    return top + scene_h + 8 + 17 + 3 * 23 + 3 + 2 * 15 + 14
-
-
-def column_item(d, x, w, y, st):
-    region, place, kicker = st.region, st.place, st.kicker
-    glyph, head, status, counters = st.glyph, st.headline, st.status, st.detail
-    col = REGION_COLOR[region]
-    draw_glyph(d, glyph, x + 11, y + 15, 10, col)
-    tx = x + 27
-    kick = f"{REGION_SHORT[region]} · {place.upper()} · {kicker} · {STATUS_LABEL[status]}"
-    while d.textlength(kick, font=f_kick) > w - 27:
-        kick = kick[:-1]
-    kick = kick.rstrip(" ·") + "…"
-    d.text((tx, y), kick, font=f_kick, fill=col)
-    yy = y + 13
-    for ln in wrap_max(d, head, f_head_s, w - 27, 2):
-        d.text((tx, yy), ln, font=f_head_s, fill=INK)
-        yy += 14
-    c0 = counters.split("·")[0].strip()
-    d.text((tx, yy), c0, font=f_sub_s, fill=INK_SOFT)
-    return y + 13 + 28 + 12 + 5
-
-
-def columns(d, y0):
-    blocks = [
-        ("MIDDLE EAST", [5, 8, 23, 24, 25, 26]),
-        ("EUROPE", [9, 10, 11, 12, 13, 14]),
-        ("SOUTH & EAST ASIA", [7, 32, 33, 34, 35, 36]),
-        ("LATIN AMERICA", [4, 19, 20]),
-        ("AFRICA", [6, 39, 40]),
-    ]
-    widths = [266, 244, 234, 200]
-    gap = (INNER - sum(widths)) / 3
-    # assign blocks to columns: ME / EU / SEA / LA+AF
-    col_blocks = [blocks[0:1], blocks[1:2], blocks[2:3], blocks[3:5]]
-    x = M
-    bottom = y0
-    for wcol, bl in zip(widths, col_blocks):
-        y = y0
-        for reg, idxs in bl:
-            col = REGION_COLOR[reg]
-            d.rectangle([x, y, x + wcol, y + 14], fill=col)
-            d.text((x + 5, y + 2), reg, font=f_kick, fill=WHITE)
-            y += 19
-            for i in idxs:
-                y = column_item(d, x, wcol, y, STORIES[i])
-                y += 4
-        x += wcol + gap
-        bottom = max(bottom, y)
-    return bottom
-
-
-def dispatches(d, y0):
-    pool = [15, 16, 17, 18, 21, 22, 27, 28, 29, 30, 31, 37, 38, 41, 42, 43, 44, 45]
-    d.line([M, y0, W - M, y0], fill=INK, width=1)
-    d.text((M, y0 + 4), "DISPATCHES", font=f_kick, fill=INK)
-    y0 += 18
-    cols, rows = 3, 6
-    cw = (INNER - 2 * 16) / cols
-    for k, i in enumerate(pool):
-        cx = M + (k // rows) * (cw + 16)
-        cy = y0 + (k % rows) * 16
-        st = STORIES[i]
-        region, glyph, head, status, counters = st.region, st.glyph, st.headline, st.status, st.detail
-        col = REGION_COLOR[region]
-        d.rectangle([cx, cy + 3, cx + 6, cy + 9], fill=col)
-        c0 = counters.split("·")[0].strip()
-        txt = f"{head} -- {c0}"
-        while txt and d.textlength(txt, font=f_disp) > cw - 14:
-            txt = txt[:-1]
-        d.text((cx + 11, cy), txt.rstrip() + ("..." if len(txt) < len(head) + 4 else ""),
-               font=f_disp, fill=INK)
-    return y0 + rows * 16 + 6
-
-
-def date_check(d, y0):
-    y1 = y0 + 34
-    d.rectangle([M, y0, W - M, y1], fill=INK)
-    items = "  |  ".join(f"{dt} {txt}" for dt, txt, _rg, verdict in DATE_CHECK)
-    line = "DATE CHECK -- NOT OF THIS DAY:  " + items
-    if d.textlength(line, font=f_dc) > INNER - 16:
-        while d.textlength(line + "...", font=f_dc) > INNER - 16:
-            line = line[:-1]
-        line += "..."
-    d.text((M + 8, y0 + 6), line, font=f_dc, fill=WHITE)
-    d.text((M + 8, y0 + 19),
-           "every story above was first reported on 22 Nov 2026; earlier "
-           "developments were cut, however large.",
-           font=f_foot, fill=blend(WHITE, INK, .25))
-
-
-def footer(d):
-    d.line([M, H - 16, W - M, H - 16], fill=INK_SOFT, width=1)
-    d.text((M, H - 13), "THE WORLD DAILY - set in code, drawn by hand",
-           font=f_foot, fill=INK_SOFT)
-    t = "page 1 of 1"
-    d.text((W - M - d.textlength(t, font=f_foot), H - 13), t,
-           font=f_foot, fill=INK_SOFT)
+            if row:
+                rows.append(row)
+            row = word
+    if row:
+        rows.append(row)
+    if max_lines and len(rows) > max_lines:
+        rows = rows[:max_lines]
+        while d.textlength(rows[-1] + "…", font=ft) > width * SCALE and rows[-1]:
+            rows[-1] = rows[-1][:-1]
+        rows[-1] += "…"
+    for i, row in enumerate(rows):
+        fdraw(d, (x, y + i * size * leading), row, size, fill, bold, serif)
+    return y + len(rows) * size * leading
+
+
+def illustration(d, box, glyph, accent):
+    x, y, w, h = box
+    rect(d, (x, y, x + w, y + h), fill=(219, 221, 215))
+    # A restrained ink-and-accent vocabulary: horizon, black silhouette, one red mark.
+    line(d, [(x, y + h - 41), (x + w, y + h - 41)], fill=accent, width=1)
+    cx, cy = x + w * .52, y + h * .48
+    if glyph in {"alert", "explosion"}:
+        rect(d, (x + 26, y + h - 52, x + w - 45, y + h - 40), fill=INK)
+        for i in range(3):
+            line(d, [(cx + i * 6, cy + 25), (cx - 8 - i * 8, cy - 20 - i * 9)], fill=INK, width=2)
+        d.ellipse(((cx - 23) * SCALE, (cy - 25) * SCALE, (cx + 23) * SCALE, (cy + 21) * SCALE), outline=accent, width=2 * SCALE)
+        line(d, [(cx, cy + 2), (cx + 10, cy - 10), (cx + 3, cy - 32)], fill=RED, width=3)
+    elif glyph in {"ship", "tanker", "flag"}:
+        poly = [(x + 45, y + h - 68), (x + w - 50, y + h - 68), (x + w - 69, y + h - 44), (x + 69, y + h - 44)]
+        d.polygon([(a * SCALE, b * SCALE) for a, b in poly], fill=INK)
+        line(d, [(cx, y + 45), (cx, y + h - 68)], fill=INK, width=2)
+        d.polygon([(cx, y + 49), (cx + 34, y + 60), (cx, y + 66)], fill=RED)
+        for i in range(4):
+            line(d, [(x + i * 21, y + h - 36), (x + 13 + i * 21, y + h - 27)], fill=BLUE, width=1)
+    elif glyph in {"drone", "plane", "crash"}:
+        line(d, [(cx - 50, cy + 20), (cx + 42, cy - 26)], fill=INK, width=3)
+        line(d, [(cx - 13, cy + 2), (cx - 42, cy - 23)], fill=INK, width=2)
+        line(d, [(cx + 8, cy - 9), (cx + 35, cy - 32)], fill=INK, width=2)
+        d.ellipse(((cx - 6) * SCALE, (cy - 8) * SCALE, (cx + 7) * SCALE, (cy + 6) * SCALE), fill=RED)
+        line(d, [(cx + 48, cy - 31), (cx + 12, cy - 6)], fill=RED, width=2)
+    elif glyph in {"ballot", "court", "key"}:
+        rect(d, (cx - 42, cy - 17, cx + 44, cy + 48), fill=(42, 39, 35))
+        rect(d, (cx - 27, cy - 5, cx + 29, cy + 7), fill=PAPER)
+        line(d, [(cx - 4, cy - 41), (cx - 4, cy - 16)], fill=INK, width=3)
+        d.polygon([(cx - 18, cy - 42), (cx + 14, cy - 22), (cx - 4, cy - 18)], fill=RED)
+    elif glyph in {"power", "money", "heart"}:
+        line(d, [(cx - 30, y + h - 48), (cx + 5, cy - 21), (cx - 8, cy + 5), (cx + 42, y + h - 49)], fill=INK, width=4)
+        d.ellipse(((cx - 8) * SCALE, (cy - 38) * SCALE, (cx + 24) * SCALE, (cy - 5) * SCALE), fill=RED)
+        line(d, [(cx + 8, cy - 21), (cx + 8, cy + 22)], fill=INK, width=2)
+    else:
+        # Architecture / abstract map / orbital object.
+        rect(d, (cx - 42, cy - 35, cx + 42, y + h - 42), fill=INK)
+        for yy in range(int(cy - 20), int(y + h - 52), 14):
+            for xx in range(int(cx - 31), int(cx + 31), 16):
+                rect(d, (xx, yy, xx + 7, yy + 7), fill=PAPER)
+        d.ellipse(((cx - 12) * SCALE, (cy - 12) * SCALE, (cx + 18) * SCALE, (cy + 18) * SCALE), fill=RED)
+    # tactile registration specks make the stock feel printed, never photographic.
+    for i in range(7):
+        px = x + 8 + ((i * 37 + len(glyph) * 11) % max(1, int(w - 16)))
+        py = y + 8 + ((i * 19 + len(glyph) * 7) % max(1, int(h - 16)))
+        d.ellipse((px * SCALE, py * SCALE, (px + 1) * SCALE, (py + 1) * SCALE), fill=(178, 178, 168))
+
+
+def draw_lead(d, story, box, index):
+    x, y, w, h = box
+    accent = REGION_COLORS.get(story.region, BLUE)
+    illustration(d, (x, y, w, 120), story.glyph, accent)
+    meta = f"{story.region} · {STATUS_LABEL[story.status]}"
+    fdraw(d, (x, y + 128), meta, 8, accent, True, True)
+    end = wrapped(d, story.headline, x, y + 145, w, 18, INK, True, True, 3, 0.97)
+    wrapped(d, story.detail, x, end + 3, w, 9, MUTED, False, False, 2, 1.05)
+    fdraw(d, (x, y + h - 6), story.source, 7, MUTED, False, True)
+
+
+def draw_well(d, story, x, y, w, row_h):
+    accent = REGION_COLORS.get(story.region, BLUE)
+    # No card outline: only a short editorial rule and a tiny glyph mark.
+    line(d, [(x, y + 5), (x + 14, y + 5)], fill=accent, width=3)
+    fdraw(d, (x + 20, y), f"{story.region} · {STATUS_LABEL[story.status]}", 7, accent, True, True)
+    wrapped(d, story.headline, x + 20, y + 12, w - 20, 10, INK, True, True, 2, .93)
+    wrapped(d, story.detail, x + 20, y + row_h - 17, w - 20, 7, MUTED, False, False, 1, 1)
+    # one primitive keyed to the story type, functioning as a newspaper marginal mark
+    if story.glyph in {"water", "snow"}:
+        for i in range(3):
+            line(d, [(x + 1, y + 16 + i * 4), (x + 12, y + 16 + i * 4)], fill=accent, width=1)
+    elif story.glyph in {"ballot", "key"}:
+        rect(d, (x, y + 16, x + 11, y + 25), outline=accent, width=1)
+    else:
+        line(d, [(x + 6, y + 14), (x + 2, y + 25), (x + 10, y + 21), (x + 4, y + 21)], fill=accent, width=1)
 
 
 def main():
-    img = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(img)
-    paper_texture(d)
-    masthead(d)
-    scoreboard(d)
-    region_band(d)
-    y = lead_cards(d, 184)
-    d.rectangle([M, y + 4, W - M, y + 6], fill=INK)
-    y = columns(d, y + 14)
-    y = dispatches(d, y + 8)
-    date_check(d, max(y + 4, H - 58))
-    footer(d)
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
-    img.save(out, optimize=True)
-    prev = img.resize((300, 300), Image.LANCZOS)
-    prev.save(os.path.join(os.path.dirname(out), "preview-300.png"), optimize=True)
-    print("entry.png:", os.path.getsize(out), "bytes")
+    random.seed(34215311)
+    im = Image.new("RGB", (W * SCALE, H * SCALE), PAPER)
+    d = ImageDraw.Draw(im)
+    # Fine, deterministic newsprint grain.
+    for _ in range(3200):
+        x, y = random.randrange(W * SCALE), random.randrange(H * SCALE)
+        shade = random.choice([(221, 219, 208), (235, 233, 222), (202, 198, 185)])
+        d.point((x, y), fill=shade)
+
+    margin = 22
+    line(d, [(margin, 23), (W - margin, 23)], width=4)
+    fdraw(d, (margin, 35), "THE WORLD DAILY", 16, INK, True, True)
+    fdraw(d, (W - margin, 36), "one day on earth, drawn by hand", 12, MUTED, False, True, "ra")
+    fdraw(d, (W / 2, 53), "Sunday 22 November 2026", 46, INK, True, True, "ma")
+    line(d, [(margin, 105), (W - margin, 105)], width=2)
+    line(d, [(margin, 110), (W - margin, 110)], width=1)
+
+    scoreboard = [("186", "DRONES"), ("0", "DEAL AT COP31"), ("74,742", "GAZA TOLL"), ("$12.1BN", "WFP ASK"), (str(len(STORIES)), "STORIES / 7 REGIONS")]
+    rect(d, (margin, 118, W - margin, 147), fill=RED)
+    xx = margin + 4
+    for i, (big, label) in enumerate(scoreboard):
+        fdraw(d, (xx, 125), big, 15, PAPER, True)
+        fdraw(d, (xx + (len(big) * 9 + 8), 126), label, 11, PAPER, True)
+        xx += [116, 205, 216, 154, 0][i]
+        if i < len(scoreboard) - 1:
+            line(d, [(xx - 9, 124), (xx - 9, 141)], fill=PAPER, width=1)
+
+    regions = []
+    for s in STORIES:
+        if s.region not in regions:
+            regions.append(s.region)
+    counts = [sum(1 for s in STORIES if s.region == r) for r in regions]
+    band_y, band_h = 156, 19
+    xx = margin
+    for r, count in zip(regions, counts):
+        ww = (W - 2 * margin) * count / len(STORIES)
+        rect(d, (xx, band_y, xx + ww, band_y + band_h), fill=REGION_COLORS.get(r, BLUE))
+        label = f"{r} {count}"
+        if ww > 75:
+            fdraw(d, (xx + 6, band_y + 3), label, 9, PAPER, True)
+        xx += ww
+
+    lead_y = 184
+    gap = 8
+    lead_w = (W - 2 * margin - gap * 3) / 4
+    for i, s in enumerate(STORIES[:4]):
+        draw_lead(d, s, (margin + i * (lead_w + gap), lead_y, lead_w, 302), i)
+
+    rule_y = 496
+    line(d, [(margin, rule_y), (W - margin, rule_y)], width=3)
+    # Four unequal wells: a broad middle-east column, two mid columns, and a compact tail.
+    cols = [(22, 264), (300, 255), (564, 222), (800, 202)]
+    buckets = [[], [], [], []]
+    for s in STORIES[4:]:
+        if s.region == "MIDDLE EAST": buckets[0].append(s)
+        elif s.region == "EUROPE": buckets[1].append(s)
+        elif s.region == "SOUTH & EAST ASIA": buckets[2].append(s)
+        else: buckets[3].append(s)
+    col_names = ["MIDDLE EAST", "EUROPE", "SOUTH & EAST ASIA", "LATIN AMERICA / AFRICA"]
+    for ci, ((x, w), stories) in enumerate(zip(cols, buckets)):
+        fdraw(d, (x, 505), col_names[ci], 10, REGION_COLORS.get(stories[0].region, GREEN), True, True)
+        row_h = 39 if ci < 3 else 47
+        for j, story in enumerate(stories):
+            draw_well(d, story, x, 523 + j * row_h, w, row_h)
+
+    # Dispatch ribbon keeps the smallest stories legible without pretending they are cards.
+    dispatch_y = 919
+    line(d, [(margin, dispatch_y), (W - margin, dispatch_y)], width=1)
+    fdraw(d, (margin, dispatch_y + 6), "DISPATCHES", 9, INK, True, True)
+    tail = [s for s in STORIES[4:] if s not in sum(buckets, [])]
+    # All stories are represented above; use the final three as a deliberate wire crawl.
+    wire = STORIES[-5:]
+    wx = 113
+    for story in wire:
+        snippet = f"{story.headline} — {story.source}"
+        wrapped(d, snippet, wx, dispatch_y + 5, 168, 7, INK, False, False, 2, 1.1)
+        wx += 177
+
+    check_y = 970
+    rect(d, (margin, check_y, W - margin, 1002), fill=(224, 220, 207))
+    fdraw(d, (margin + 7, check_y + 7), "DATE CHECK", 9, RED, True, True)
+    fdraw(d, (105, check_y + 7), "prior-day claims retained as context · not counted in today's leads", 8, MUTED, False, True)
+    for i, (date, claim, region, verdict) in enumerate(DATE_CHECK[:3]):
+        fdraw(d, (margin + 7 + i * 322, check_y + 18), f"{date}  {claim[:31]}…", 7, INK, False, False)
+
+    im.resize((W, H), Image.Resampling.LANCZOS).save(OUT, optimize=False)
+    print(OUT)
 
 
 if __name__ == "__main__":
